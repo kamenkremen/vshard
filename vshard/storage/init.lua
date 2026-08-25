@@ -385,6 +385,33 @@ local function bucket_check_is_synced()
     return true
 end
 
+--
+-- Wait until this instance is a synchronized master and return its bucket
+-- count.
+--
+-- This does not guarantee that a later bucket_create() call succeeds. The
+-- master can change between the calls, and the new master may still be
+-- synchronizing _bucket, so bucket_create() may return MASTER_NOT_SYNCED.
+--
+local function storage_wait_bucket_sync(timeout)
+    local deadline = fiber_clock() + timeout
+    while true do
+        local ok, err = bucket_check_is_synced()
+        if ok then
+            return bucket_count()
+        end
+        if err.code ~= lerror.code.MASTER_NOT_SYNCED then
+            return nil, err
+        end
+
+        timeout = deadline - fiber_clock()
+        if timeout <= 0 then
+            return nil, err
+        end
+        lfiber.sleep(math.min(consts.MASTER_ENABLE_WAIT_INTERVAL, timeout))
+    end
+end
+
 local function bucket_space_op(name, ...)
     local ok, err = bucket_check_is_synced()
     if not ok then
@@ -3748,6 +3775,7 @@ service_call_api = setmetatable({
     storage_ref_make_with_buckets = storage_ref_make_with_buckets,
     storage_ref_check_with_buckets = storage_ref_check_with_buckets,
     storage_unref = storage_unref,
+    storage_wait_bucket_sync = storage_wait_bucket_sync,
     storage_map = storage_map,
     storage_bucket_checkpoint = storage_bucket_checkpoint,
     create_replicaset_recovery_point = create_replicaset_recovery_point,

@@ -1337,7 +1337,6 @@ end
 --------------------------------------------------------------------------------
 
 local function cluster_bootstrap(router, opts)
-    local replicasets = {}
     local count, err, last_err, ok, if_not_bootstrapped
     if opts then
         if type(opts) ~= 'table' then
@@ -1352,9 +1351,13 @@ local function cluster_bootstrap(router, opts)
         if_not_bootstrapped = false
     end
 
+    local timeout = opts and opts.timeout or consts.CALL_TIMEOUT_MIN
+    local wait_timeout = math.max(
+        timeout - consts.MASTER_ENABLE_WAIT_INTERVAL, 0)
     for _, replicaset in pairs(router.replicasets) do
-        table.insert(replicasets, replicaset)
-        count, err = replicaset:callrw('vshard.storage.buckets_count', {}, opts)
+        count, err = replicaset:callrw(
+            'vshard.storage._call',
+            {'storage_wait_bucket_sync', wait_timeout}, {timeout = timeout})
         if count == nil then
             -- If the client considers a bootstrapped cluster ok,
             -- then even one count > 0 is enough. So don't stop
@@ -1381,9 +1384,9 @@ local function cluster_bootstrap(router, opts)
     for id, replicaset in pairs(router.replicasets) do
         if replicaset.etalon_bucket_count > 0 then
             ok, err =
-                replicaset:callrw('vshard.storage.bucket_force_create',
-                                  {bucket_id, replicaset.etalon_bucket_count},
-                                  opts)
+                replicaset:callrw('vshard.storage._call',
+                                  {'bucket_create', bucket_id,
+                                   replicaset.etalon_bucket_count}, opts)
             if not ok then
                 return nil, err
             end
