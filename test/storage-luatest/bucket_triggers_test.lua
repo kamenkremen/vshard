@@ -578,3 +578,29 @@ test_group.test_bucket_generation_checks = function(g)
         drop_bucket(bid)
     end)
 end
+
+test_group.test_bucket_create_on_replica = function(g)
+    local bid = cfg_template.bucket_count + 1
+    local ok, err, bucket = g.replica_1_b:exec(function(bid)
+        local ok, err = ivshard.storage.bucket_create(bid)
+        return ok, err, box.space._bucket:get(bid)
+    end, {bid})
+    t.assert_equals(ok, nil)
+    t.assert_equals(err.code, verror.code.NON_MASTER)
+    t.assert_equals(bucket, nil)
+end
+
+test_group.test_bucket_create_on_unsynced_master = function(g)
+    local bid = cfg_template.bucket_count + 1
+    local ok, err, bucket = g.replica_1_a:exec(function(bid)
+        local internal = ivshard.storage.internal
+        local was_in_sync = internal.is_bucket_in_sync
+        internal.is_bucket_in_sync = false
+        local ok, err = ivshard.storage.bucket_create(bid)
+        internal.is_bucket_in_sync = was_in_sync
+        return ok, err, box.space._bucket:get(bid)
+    end, {bid})
+    t.assert_equals(ok, nil)
+    t.assert_equals(err.code, verror.code.MASTER_NOT_SYNCED)
+    t.assert_equals(bucket, nil)
+end
