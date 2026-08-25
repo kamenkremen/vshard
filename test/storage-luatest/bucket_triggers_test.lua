@@ -102,6 +102,58 @@ local function bucket_set_protection(value)
     ivshard.storage.internal.is_bucket_protected = value
 end
 
+test_group.test_bucket_create = function(g)
+    local rep_a = g.replica_1_a
+    local rep_b = g.replica_1_b
+    local bid = cfg_template.bucket_count + 1
+
+    local ok, err, status = rep_a:exec(function(bid)
+        local ok, err = ivshard.storage.bucket_create(bid)
+        local bucket = box.space._bucket:get(bid)
+        return ok, err, bucket and bucket.status
+    end, {bid})
+    vtest.cluster_exec_each(g, bucket_set_protection, {false})
+    rep_a:exec(bucket_force_drop, {bid})
+    rep_b:wait_vclock_of(rep_a)
+    vtest.cluster_exec_each(g, bucket_set_protection, {true})
+    t.assert_equals(rep_a:exec(function(bid)
+        return box.space._bucket:get(bid)
+    end, {bid}), nil)
+    t.assert_equals(rep_b:exec(function(bid)
+        return box.space._bucket:get(bid)
+    end, {bid}), nil)
+
+    t.assert_equals(err, nil)
+    t.assert(ok)
+    t.assert_equals(status, vconst.BUCKET.ACTIVE)
+end
+
+test_group.test_bucket_create_on_replica = function(g)
+    local bid = cfg_template.bucket_count + 1
+    local ok, err, bucket = g.replica_1_b:exec(function(bid)
+        local ok, err = ivshard.storage.bucket_create(bid)
+        return ok, err, box.space._bucket:get(bid)
+    end, {bid})
+    t.assert_equals(ok, nil)
+    t.assert_equals(err.code, verror.code.NON_MASTER)
+    t.assert_equals(bucket, nil)
+end
+
+test_group.test_bucket_create_on_unsynced_master = function(g)
+    local bid = cfg_template.bucket_count + 1
+    local ok, err, bucket = g.replica_1_a:exec(function(bid)
+        local internal = ivshard.storage.internal
+        local was_in_sync = internal.is_bucket_in_sync
+        internal.is_bucket_in_sync = false
+        local ok, err = ivshard.storage.bucket_create(bid)
+        internal.is_bucket_in_sync = was_in_sync
+        return ok, err, box.space._bucket:get(bid)
+    end, {bid})
+    t.assert_equals(ok, nil)
+    t.assert_equals(err.code, verror.code.MASTER_NOT_SYNCED)
+    t.assert_equals(bucket, nil)
+end
+
 --
 -- Test what happens when a bucket is unable to get new reads nor writes.
 --
