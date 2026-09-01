@@ -285,6 +285,11 @@ else
     if M.is_master_cond == nil then
         M.is_master_cond = lfiber.cond()
     end
+    -- It could be nil when reloaded from an old vshard version,
+    -- but current vshard thinks that it's a table.
+    if M.errinj.ERRINJ_WORKER_PREPARE_WAKEUP_DELAY == nil then
+        M.errinj.ERRINJ_WORKER_PREPARE_WAKEUP_DELAY = {}
+    end
 end
 
 --
@@ -2230,7 +2235,7 @@ end
 
 local function bucket_test_send_on_replicas(buckets, opts)
     assert(opts and opts.sync_timeout and opts.deadline)
-    local ok, err, _
+    local ok, err
     local sync_deadline = fiber_clock() + opts.sync_timeout
     local deadline = math.min(sync_deadline, opts.deadline)
     ok, err = wait_lsn(deadline - fiber_clock(), consts.WAIT_LSN_STEP)
@@ -2243,7 +2248,8 @@ local function bucket_test_send_on_replicas(buckets, opts)
     -- Use smaller timeout to reveal the error from storage if it's
     -- available, user timeout is passed to the call itself.
     local wait_timeout = call_timeout / 1.5
-    _, err = M.this_replicaset:map_call('vshard.storage._call',
+    local map_res
+    map_res, err = M.this_replicaset:map_call('vshard.storage._call',
         {'bucket_test_send', buckets, {timeout = wait_timeout}}, {
             timeout = call_timeout,
             except = M.this_replica.id,
@@ -2251,6 +2257,11 @@ local function bucket_test_send_on_replicas(buckets, opts)
     if err then
         err = lerror.from_string(err.message) or err
         return nil, err
+    end
+    for _, res in pairs(map_res) do
+        if res[1] == nil and res[2] ~= nil then
+            return nil, res[2]
+        end
     end
     return true
 end
@@ -2478,8 +2489,9 @@ local function gc_bucket_process_sent_one_batch_xc(batch)
     local is_done = true
     for _, res in pairs(map_res) do
         res, err = res[1], res[2]
-        -- Can't fail so far.
-        assert(err == nil)
+        if err ~= nil then
+            error(err)
+        end
         res = res.bids_not_ok
         if next(res) ~= nil then
             is_done = false
@@ -3732,7 +3744,13 @@ service_call_api = setmetatable({
 end})
 
 local function service_call(service_name, ...)
-    return service_call_api[service_name](...)
+    local service = service_call_api[service_name]
+    if service == nil then
+        local err = box.error.new(box.error.UNSUPPORTED,
+                                  'vshard.storage._call', service_name)
+        return nil, lerror.make(err)
+    end
+    return service(...)
 end
 
 --------------------------------------------------------------------------------
@@ -4601,6 +4619,14 @@ if not rawget(_G, MODULE_INTERNALS) then
     rawset(_G, MODULE_INTERNALS, M)
 else
     reload_evolution.upgrade(M)
+    -- Reconfiguration may start services before the regular function
+    -- assignments at module end. Publish callbacks absent from the old module,
+    -- but keep existing callbacks unchanged until the reload succeeds.
+    M.recovery_f = M.recovery_f or recovery_f
+    M.rebalancer_f = M.rebalancer_f or rebalancer_f
+    M.gc_bucket_f = M.gc_bucket_f or gc_bucket_f
+    M.instance_watch_f = M.instance_watch_f or instance_watch_f
+    M.master_sync_f = M.master_sync_f or master_sync_f
     if M.current_cfg then
         storage_cfg(M.current_cfg, M.this_replica.id or M.this_replica.uuid,
                     true)
